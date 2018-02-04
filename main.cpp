@@ -14,14 +14,64 @@ typedef DIRECT_SOUND_CREATE(direct_sound_create);
 class AudioBuffer
 {
 public:
-    void Upload(void* data, size_t bytes, int bps, int channels)
+    enum RETCODE
     {
-        this->data = malloc(bytes);
-        this->bytes = bytes;
-        this->bps = bps;
-        this->channels = channels;
+        RET_OK,
+        RET_INVALID_PARAMETERS,
+        RET_INVALID_BIT_PER_SAMPLE_VALUE
+    };
+
+    AudioBuffer(int sampleRate, int bitPerSample, int nChannels)
+    : data(0), bytes(0), sampleRate(sampleRate), bitPerSample(bitPerSample), nChannels(nChannels)
+    {
         
-        memcpy(this->data, data, bytes);
+    }
+    ~AudioBuffer()
+    {
+        if(data)
+            free(data);
+    }
+    int Upload(void* data, size_t len, int srcSampleRate, int srcBitPerSample, int srcNChannels)
+    {
+        this->bytes = len;
+        
+        if(srcBitPerSample != 8 &&
+            srcBitPerSample != 16 &&
+            srcBitPerSample != 24)
+        {
+            return RET_INVALID_BIT_PER_SAMPLE_VALUE;
+        }
+        if(srcNChannels > 2 || srcNChannels < 1)
+        {
+            return RET_INVALID_PARAMETERS;
+        }
+        
+        int srcBytePerSample = srcBitPerSample / 8;
+        int destBytePerSample = bitPerSample / 8;
+        int srcSampleCount = len / srcBytePerSample;
+        
+        this->data = malloc(srcSampleCount * (bitPerSample / 8) * nChannels);
+        char* t_data = (char*)(this->data);
+        char* t_src = (char*)data;
+        for(unsigned i = 0; i < srcSampleCount; ++i)
+        {
+            ConvertSample(
+                &t_src[i * srcBytePerSample],
+                &t_data[i * destBytePerSample],
+                srcBytePerSample,
+                destBytePerSample
+            ); 
+        }
+        
+        return RET_OK;
+    }
+    
+    void ConvertSample(char* src, char* dest, int fromBps, int toBps)
+    {
+        for(unsigned i = 0; i < fromBps && i < toBps; ++i)
+        {
+            dest[toBps - i - 1] = src[fromBps - i - 1];
+        }
     }
     
     size_t Size() { return bytes; }
@@ -45,7 +95,7 @@ public:
         {
             short ls = ((short*)clip1)[i];
             short rs = ((short*)clip1)[i + 1];
-            short sample = ls > rs ? ls : rs;
+            short sample = ((int)ls + rs) / 2;
             clip[i] += sample * leftVol;
             clip[i + 1] += sample * rightVol;
         }
@@ -53,16 +103,17 @@ public:
         {
             short ls = ((short*)clip2)[i];
             short rs = ((short*)clip2)[i + 1];
-            short sample = ls > rs ? ls : rs;
-            clip[szAudio1 + i] += sample * leftVol;
-            clip[szAudio1 + i + 1] += sample * rightVol;
+            short sample = ((int)ls + rs) / 2;
+            clip[szAudio1 / 2 + i] += sample * leftVol;
+            clip[szAudio1 / 2 + i + 1] += sample * rightVol;
         }
     }
 private:
     void* data;
     size_t bytes;
-    int bps;
-    int channels;
+    int sampleRate;
+    int bitPerSample;
+    int nChannels;
 };
 
 struct AudioEmitter
@@ -95,7 +146,7 @@ struct AudioEmitter
             return;
         if(stopped)
             return;
-        
+        //std::cout << "Cursor: " << cursor << std::endl;
         buffer->CopyData(
             dest, 
             destSz, 
@@ -112,13 +163,16 @@ struct AudioEmitter
         cursor += adv;
         if(cursor >= bufSize)
             cursor = cursor - bufSize;
+        
+        std::cout << "Cursor: " << cursor << std::endl;
+        std::cout << "BufSize: " << bufSize << std::endl;
     }
 };
 
 class AudioMixer3D
 {
 public:
-    int Init();
+    int Init(int sampleRate, int bitPerSample);
     void Cleanup();
     
     void EarDistance(float meters) { earDistance = meters; }
@@ -139,7 +193,7 @@ public:
         void* audio2;
         DWORD szAudio2;
         hr = SecondaryBuffer->Lock(
-            writePos, 10000,
+            writePos, 44100,
             &audio1, &szAudio1,
             &audio2, &szAudio2,
             0 
@@ -154,30 +208,19 @@ public:
             dPos = writePos - prevWritePos;
         else
         {
-            dPos = (44100 * 8 - prevWritePos) + writePos;
+            dPos = (sampleRate * bitPerSample / 8 - prevWritePos) + writePos;
         }
         
         ZeroMemory(buffer, sizeof(buffer));
-        //audioModule.Update((void*)buffer, 4410, dPos / 2);
         for(AudioEmitter* obj : objects)
         {
+            obj->Advance(dPos);
             obj->Mix(
                 (void*)buffer, 
                 sizeof(buffer), 
                 gfxm::vec3(-0.1075f, 0.0f, 0.0f),
                 gfxm::vec3(0.1075f, 0.0f, 0.0f)
             );
-            obj->Advance(dPos);
-            /*
-            obj->buffer->CopyData(
-                (void*)buffer, 
-                10000, 
-                obj->cursor += dPos,
-                gfxm::vec3(-0.1075f, 0.0f, 0.0f),
-                gfxm::vec3(0.1075f, 0.0f, 0.0f),
-                obj->position
-            );
-            */
         }
         prevWritePos = writePos;
         
@@ -194,7 +237,7 @@ public:
     
     AudioBuffer* CreateBuffer()
     {
-        AudioBuffer* buf = new AudioBuffer();
+        AudioBuffer* buf = new AudioBuffer(sampleRate, bitPerSample, nChannels);
         buffers.push_back(buf);
         return buf;
     }
@@ -225,6 +268,10 @@ public:
     }
     
 private:
+    int sampleRate;
+    int bitPerSample;
+    int nChannels;
+
     float earDistance = 0.215f;
     std::vector<AudioBuffer*> buffers;
     std::vector<AudioEmitter*> objects;
@@ -237,8 +284,12 @@ private:
     HWND hWnd;
 };
 
-int AudioMixer3D::Init()
+int AudioMixer3D::Init(int sampleRate, int bitPerSample)
 {
+    this->sampleRate = sampleRate;
+    this->bitPerSample = bitPerSample;
+    this->nChannels = 2;
+    
     HINSTANCE hInstance = GetModuleHandle(0);
   
     WNDCLASSEX wc;
@@ -273,7 +324,16 @@ int AudioMixer3D::Init()
     //ShowWindow(hWnd, SW_SHOW);
     UpdateWindow(hWnd);
     
-    WAVEFORMATEX wfx = { WAVE_FORMAT_PCM, 2, 44100, 44100 * 4, 4, 16, 0 };
+    int blockAlign = (bitPerSample * nChannels) / 8;
+    WAVEFORMATEX wfx = { 
+        WAVE_FORMAT_PCM, 
+        nChannels, 
+        sampleRate, 
+        sampleRate * blockAlign, 
+        blockAlign, 
+        bitPerSample, 
+        0 
+    };
     
     HRESULT hr;
     HMODULE DSoundLib = LoadLibraryA("dsound.dll");
@@ -311,7 +371,7 @@ int AudioMixer3D::Init()
             }
             
             BuffDesc.dwFlags = DSBCAPS_GLOBALFOCUS;
-            BuffDesc.dwBufferBytes = 44100 * 8;
+            BuffDesc.dwBufferBytes = sampleRate * bitPerSample / 8;
             BuffDesc.lpwfxFormat = &wfx;
             hr = DirectSound->CreateSoundBuffer(&BuffDesc, &SecondaryBuffer, 0);
             if(FAILED(hr))
@@ -368,7 +428,7 @@ AudioBuffer* LoadAudioBuffer(AudioMixer3D* mixer, const std::string& name)
     int len;
     len = stb_vorbis_decode_filename(name.c_str(), &channels, &sampleRate, &decoded);
     
-    buffer->Upload((void*)decoded, len * sizeof(short), sampleRate, channels);
+    buffer->Upload((void*)decoded, len * sizeof(short) * channels, sampleRate, 16, channels);
     free(decoded);
     
     return buffer;
@@ -377,12 +437,12 @@ AudioBuffer* LoadAudioBuffer(AudioMixer3D* mixer, const std::string& name)
 int main()
 {
     AudioMixer3D mixer;
-    mixer.Init();
+    mixer.Init(48000, 16);
     
     AudioEmitter* obj = mixer.CreateInstance();
-    obj->buffer = LoadAudioBuffer(&mixer, "test.ogg");
+    obj->buffer = LoadAudioBuffer(&mixer, "test24.ogg");
     obj->position = gfxm::vec3(0.2f, 0.2f, -0.65f);
-    obj->Play();
+    obj->Play(1);
     obj = mixer.CreateInstance();
     obj->buffer = LoadAudioBuffer(&mixer, "test2.ogg");
     
