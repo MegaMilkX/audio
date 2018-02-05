@@ -8,6 +8,11 @@
 
 #include "gfxm.h"
 
+inline size_t FixIndexOverflow(size_t index, size_t size)
+{
+    return index % size;
+}
+
 #define DIRECT_SOUND_CREATE(name) HRESULT WINAPI name(LPCGUID pcGuidDevice, LPDIRECTSOUND *ppDS, LPUNKNOWN pUnkOuter)
 typedef DIRECT_SOUND_CREATE(direct_sound_create);
 
@@ -75,6 +80,45 @@ public:
     }
     
     size_t Size() { return bytes; }
+    
+    void Mix(char* data,
+        size_t tgtBytes,
+        int tgtSampleRate,
+        int tgtBitPerSample,
+        int tgtNChannels,
+        size_t cursor)
+    {
+        int tgtBytePerSample = tgtBitPerSample / 8;
+        int bytePerSample = bitPerSample / 8;
+        char* buf = this->data;
+        size_t bufSize = this->bytes;
+        int szClip1 = (bufSize - cursor > tgtBytes) ? (tgtBytes) : (bufSize - cursor);
+        int szClip2 = (szAudio1 < tgtBytes) ? (tgtBytes - szAudio1) : 0;
+        char* clip1 = (char*)buf + cursor;
+        char* clip2 = (char*)buf;
+        int tgtSamplePerChannelCount = tgtBytes / tgtBytePerSample / tgtNChannels;
+        
+        for(size_t sampleIndex = 0; sampleIndex < tgtSamplePerChannelCount; ++sampleIndex)
+        {
+            for(size_t chan = 0; chan < tgtNChannels; ++chan)
+            {
+                char* pSampleA = 
+                    clip1 + (bytePerSample * chan);
+                char* pSampleB = 
+                    clip1 + (bytePerSample * chan) + bytePerSample * nChannels;
+                int sampleA = SampleTo32Bit(
+                    pSampleA, 
+                    bitPerSample
+                );
+                int sampleB = SampleTo32Bit(
+                    pSampleB, 
+                    bitPerSample
+                );
+                //int sampleInterpolated = gfxm::lerp(sampleA, sampleB, );
+                
+            }
+        }
+    }
     
     void CopyData(void* data, size_t bytes, int cursor, gfxm::vec3 leftEarPos, gfxm::vec3 rightEarPos, gfxm::vec3 sourcePos)
     {
