@@ -86,19 +86,20 @@ public:
         int tgtSampleRate,
         int tgtBitPerSample,
         int tgtNChannels,
-        size_t cursor)
+        float cursor)
     {
         int tgtBytePerSample = tgtBitPerSample / 8;
         int bytePerSample = bitPerSample / 8;
         char* buf = this->data;
         size_t bufSize = this->bytes;
-        int szClip1 = (bufSize - cursor > tgtBytes) ? (tgtBytes) : (bufSize - cursor);
+        size_t iCursor = cursor;
+        int szClip1 = (bufSize - iCursor > tgtBytes) ? (tgtBytes) : (bufSize - iCursor);
         int szClip2 = (szAudio1 < tgtBytes) ? (tgtBytes - szAudio1) : 0;
-        char* clip1 = (char*)buf + cursor;
+        char* clip1 = (char*)buf + iCursor;
         char* clip2 = (char*)buf;
-        int tgtSamplePerChannelCount = tgtBytes / tgtBytePerSample / tgtNChannels;
+        int tgtSamplePerChannelCount = tgtBytes / tgtBytePerSample;
         
-        for(size_t sampleIndex = 0; sampleIndex < tgtSamplePerChannelCount; ++sampleIndex)
+        for(size_t sampleIndex = 0; sampleIndex < tgtSamplePerChannelCount; sampleIndex += tgtNChannels)
         {
             for(size_t chan = 0; chan < tgtNChannels; ++chan)
             {
@@ -106,17 +107,39 @@ public:
                     clip1 + (bytePerSample * chan);
                 char* pSampleB = 
                     clip1 + (bytePerSample * chan) + bytePerSample * nChannels;
-                int sampleA = SampleTo32Bit(
+                int sampleA = DataToSample32(
                     pSampleA, 
                     bitPerSample
                 );
-                int sampleB = SampleTo32Bit(
+                int sampleB = DataToSample32(
                     pSampleB, 
                     bitPerSample
                 );
-                //int sampleInterpolated = gfxm::lerp(sampleA, sampleB, );
-                
+                int sampleInterpolated = gfxm::lerp(sampleA, sampleB, cursor = cursor - (long)cursor);
+                Sample32ToData(data + (sampleIndex + chan) * tgtBytePerSample, sampleInterpolated, tgtBitPerSample);
             }
+        }
+    }
+    
+    int DataToSample32(char* data, int bitPerSample)
+    {
+        int sample = 0;
+        char* pSample = (char*)&sample;
+        int bytePerSample = bitPerSample / 8;
+        for(size_t b = 0; b < bytePerSample; ++b)
+        {
+            pSample[b] = data[b];
+        }
+        return sample;
+    }
+    
+    void Sample32ToData(char* data, int sample, bitPerSample)
+    {
+        char* pSample = (char*)&sample;
+        int bytePerSample = bitPerSample / 8;
+        for(size_t b = 0; b < bytePerSample; ++b)
+        {
+            data[b] = pSample[b];
         }
     }
     
