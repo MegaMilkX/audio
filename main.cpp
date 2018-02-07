@@ -6,6 +6,9 @@
 
 #include <stdint.h>
 
+#include <xaudio2.h>
+#pragma comment(lib,"xaudio2.lib")
+
 #include "gfxm.h"
 
 inline size_t FixIndexOverflow(size_t index, size_t size)
@@ -285,62 +288,31 @@ public:
     
     void Update()
     {
-        HRESULT hr;
-        DWORD writePos = 0;
-        hr = SecondaryBuffer->GetCurrentPosition(NULL, &writePos);
-        if(FAILED(hr))
+        XAUDIO2_VOICE_STATE state;
+        pSourceVoice->GetState(&state);
+        if(state.BuffersQueued < 2)
         {
-            std::cout << "GetCurrentPosition failed" << std::endl;
+            ZeroMemory(buffer, sizeof(buffer));
+            for(AudioEmitter* obj : objects)
+            {
+                obj->Mix(
+                    (char*)buffer, 
+                    sampleRate,
+                    sampleRate,
+                    bitPerSample,
+                    nChannels, 
+                    gfxm::vec3(-0.1075f, 0.0f, 0.0f),
+                    gfxm::vec3(0.1075f, 0.0f, 0.0f)
+                );
+                obj->Advance(sampleRate, sampleRate);
+            }
+            
+            XAUDIO2_BUFFER buf = { 0 };
+            buf.AudioBytes = sampleRate;
+            buf.pAudioData = (BYTE*)buffer;
+            
+            pSourceVoice->SubmitSourceBuffer(&buf);
         }
-        
-        void* audio1;
-        DWORD szAudio1;
-        void* audio2;
-        DWORD szAudio2;
-        hr = SecondaryBuffer->Lock(
-            writePos, 44100,
-            &audio1, &szAudio1,
-            &audio2, &szAudio2,
-            0 
-        );
-        if(FAILED(hr))
-        {
-            std::cout << "Buffer lock failed: " << std::hex << hr << std::endl;
-        }
-        
-        DWORD dPos;
-        if(writePos >= prevWritePos)
-            dPos = writePos - prevWritePos;
-        else
-        {
-            dPos = (sampleRate * bitPerSample / 8 - prevWritePos) + writePos;
-        }
-        
-        ZeroMemory(buffer, sizeof(buffer));
-        for(AudioEmitter* obj : objects)
-        {
-            obj->Advance(sampleRate, dPos);
-            obj->Mix(
-                (char*)buffer, 
-                sizeof(buffer),
-                sampleRate,
-                bitPerSample,
-                nChannels, 
-                gfxm::vec3(-0.1075f, 0.0f, 0.0f),
-                gfxm::vec3(0.1075f, 0.0f, 0.0f)
-            );
-        }
-        prevWritePos = writePos;
-        
-        ZeroMemory(audio1, szAudio1);
-        ZeroMemory(audio2, szAudio2);
-        memcpy(audio1, buffer, szAudio1);
-        memcpy(audio2, buffer + szAudio1, szAudio2);
-        
-        SecondaryBuffer->Unlock(
-            audio1, szAudio1,
-            audio2, szAudio2
-        );
     }
     
     AudioBuffer* CreateBuffer()
@@ -376,6 +348,8 @@ public:
     }
     
 private:
+    IXAudio2SourceVoice* pSourceVoice;
+
     int sampleRate;
     int bitPerSample;
     int nChannels;
@@ -398,40 +372,6 @@ int AudioMixer3D::Init(int sampleRate, int bitPerSample)
     this->bitPerSample = bitPerSample;
     this->nChannels = 2;
     
-    HINSTANCE hInstance = GetModuleHandle(0);
-  
-    WNDCLASSEX wc;
-    wc.cbSize = sizeof(WNDCLASSEX);
-    wc.style = 0;
-    wc.lpfnWndProc = DefWindowProc;
-    wc.cbClsExtra = 0;
-    wc.cbWndExtra = 0;
-    wc.hInstance = hInstance;
-    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW);
-    wc.lpszMenuName = NULL;
-    wc.lpszClassName = L"window";
-    wc.hIconSm = LoadIcon(NULL, IDI_APPLICATION);
-
-    if(!RegisterClassEx(&wc))
-    {
-        return false;
-    }
-
-    hWnd = CreateWindowExW(
-        0,
-        L"window",
-        L"hiddenwindow",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
-        NULL, NULL, hInstance, NULL
-    );
-
-    ShowWindow(hWnd, SW_HIDE);
-    //ShowWindow(hWnd, SW_SHOW);
-    UpdateWindow(hWnd);
-    
     int blockAlign = (bitPerSample * nChannels) / 8;
     WAVEFORMATEX wfx = { 
         WAVE_FORMAT_PCM, 
@@ -443,76 +383,57 @@ int AudioMixer3D::Init(int sampleRate, int bitPerSample)
         0 
     };
     
-    HRESULT hr;
-    HMODULE DSoundLib = LoadLibraryA("dsound.dll");
-    if(DSoundLib)
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if(FAILED(hr))
     {
-        direct_sound_create* DirectSoundCreate = 
-            (direct_sound_create*)GetProcAddress(DSoundLib, "DirectSoundCreate");
-        
-        LPDIRECTSOUND DirectSound;
-        if(DirectSoundCreate && 
-            SUCCEEDED(DirectSoundCreate(0, &DirectSound, 0)))
-        {
-            hr = DirectSound->SetCooperativeLevel(hWnd, DSSCL_PRIORITY);
-            if(FAILED(hr))
-            {
-                std::cout << "SetCooperativeLevel failed: " << std::hex << hr << std::endl;
-                return 1;
-            }
-            
-            DSBUFFERDESC BuffDesc = { 0 };
-            BuffDesc.dwSize = sizeof(BuffDesc);
-            BuffDesc.dwFlags = DSBCAPS_PRIMARYBUFFER;
-            
-            hr = DirectSound->CreateSoundBuffer(&BuffDesc, &PrimaryBuffer, 0);
-            if(FAILED(hr))
-            {
-                std::cout << "CreateSoundBuffer failed (primary): " << std::hex << hr << std::endl;
-                return 1;
-            }
-            hr = PrimaryBuffer->SetFormat(&wfx);
-            if(FAILED(hr))
-            {
-                std::cout << "SetFormat failed (primary): " << std::hex << hr << std::endl;
-                return 1;
-            }
-            
-            BuffDesc.dwFlags = DSBCAPS_GLOBALFOCUS;
-            BuffDesc.dwBufferBytes = sampleRate * bitPerSample / 8;
-            BuffDesc.lpwfxFormat = &wfx;
-            hr = DirectSound->CreateSoundBuffer(&BuffDesc, &SecondaryBuffer, 0);
-            if(FAILED(hr))
-            {
-                std::cout << "CreateSoundBuffer failed (secondary): " << std::hex << hr << std::endl;
-                return 1;
-            }
-            
-            void* audio1;
-            DWORD szAudio1;
-            void* audio2;
-            DWORD szAudio2;
-            hr = SecondaryBuffer->Lock(
-                0, 0,
-                &audio1, &szAudio1,
-                &audio2, &szAudio2,
-                DSBLOCK_ENTIREBUFFER 
-            );
-            ZeroMemory(audio1, szAudio1);
-            ZeroMemory(audio2, szAudio2);
-            SecondaryBuffer->Unlock(
-                audio1, szAudio1,
-                audio2, szAudio2
-            );
-            
-            SecondaryBuffer->Play(0, 0, DSBPLAY_LOOPING);
-        }
-        else
-        {
-            std::cout << "DirectSoundCreate failed" << std::endl;
-            return 1;
-        }
+        std::cout << "Failed to init COM: " << hr << std::endl;
+        return 1;
     }
+    
+#if(_WIN32_WINNT < 0x602)
+#ifdef _DEBUG
+    HMODULE xAudioDll = LoadLibraryExW(L"XAudioD2_7.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+#else
+    HMODULE xAudioDll = LoadLibraryExW(L"XAudio2_7.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+#endif
+    if(!xAudioDll)
+    {
+        std::cout << "Failed to find XAudio2.7 dll" << std::endl;
+        CoUninitialize();
+        return 1;
+    }
+#endif
+    
+    UINT32 flags = 0;
+#if (_WIN32_WINNT < 0x0602 /*_WIN32_WINNT_WIN8*/) && defined(_DEBUG)
+    flags |= XAUDIO2_DEBUG_ENGINE;
+#endif
+
+    IXAudio2* pXAudio2;
+    hr = XAudio2Create(&pXAudio2, flags);
+    if(FAILED(hr))
+    {
+        std::cout << "Failed to init XAudio2: " << hr << std::endl;
+        CoUninitialize();
+        return 1;
+    }
+    
+    IXAudio2MasteringVoice* pMasteringVoice = 0;
+    if(FAILED(hr = pXAudio2->CreateMasteringVoice(&pMasteringVoice)))
+    {
+        std::cout << "Failed to create mastering voice: " << hr << std::endl;
+        //pXAudio2.Reset();
+        CoUninitialize();
+        return 1;
+    }
+    
+    if(FAILED(hr = pXAudio2->CreateSourceVoice(&pSourceVoice, &wfx, 0, 1.0f, 0)))
+    {
+        std::cout << "Failed to create source voice: " << hr << std::endl;
+        return 1;
+    }
+        
+    pSourceVoice->Start(0, 0);
     
     return 0;
 }
@@ -545,7 +466,7 @@ AudioBuffer* LoadAudioBuffer(AudioMixer3D* mixer, const std::string& name)
 int main()
 {
     AudioMixer3D mixer;
-    mixer.Init(48000, 16);
+    mixer.Init(44100, 16);
     
     AudioEmitter* obj = mixer.CreateInstance();
     obj->buffer = LoadAudioBuffer(&mixer, "test2.ogg");
