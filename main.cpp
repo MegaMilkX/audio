@@ -83,7 +83,7 @@ public:
     
     void ConvertSample(char* src, char* dest, int fromBps, int toBps)
     {
-        for(unsigned i = 0; i < fromBps && i < toBps; ++i)
+        for(int i = 0; i < fromBps && i < toBps; ++i)
         {
             dest[toBps - i - 1] = src[fromBps - i - 1];
         }
@@ -159,11 +159,16 @@ public:
         }
     }
     */
-    void CopyData(void* data, size_t bytes, double cursor, gfxm::vec3 leftEarPos, gfxm::vec3 rightEarPos, gfxm::vec3 sourcePos)
+    void CopyData(void* data, size_t bytes, size_t cursor, gfxm::vec3 leftEarPos, gfxm::vec3 rightEarPos, gfxm::vec3 sourcePos)
     {
         short* clip = (short*)data;
-        int szAudio1 = this->bytes - (size_t)cursor > bytes ? bytes : this->bytes - (size_t)cursor;
-        int szAudio2 = szAudio1 < bytes ? bytes - szAudio1 : 0;
+        //int szAudio1 = this->bytes - (size_t)cursor > bytes ? bytes : this->bytes - (size_t)cursor;
+        //int szAudio2 = szAudio1 < bytes ? bytes - szAudio1 : 0;
+        
+        size_t szAudio1 = this->bytes - (size_t)cursor;
+        if(szAudio1 > bytes) szAudio1 = bytes;
+        size_t szAudio2 = bytes - szAudio1;
+        
         char* clip1 = (char*)this->data + (size_t)cursor;
         char* clip2 = (char*)this->data;
         
@@ -175,19 +180,17 @@ public:
         if(rightVol < 0.0f) rightVol = 0.0f;
         
         CopyClip(clip1, szAudio1, nChannels, clip, 2, cursor);
-        CopyClip(clip2, szAudio2, nChannels, clip + szAudio1, 2, cursor);
+        CopyClip(clip2, szAudio2, nChannels, clip + (szAudio1 / 2), 2, cursor);
     }
     
-    void CopyClip(char* clip, size_t szClip, int srcNChannels, short* tgtClip, int tgtNChannels, double cursor)
+    void CopyClip(char* clip, size_t szClip, int srcNChannels, short* tgtClip, int tgtNChannels, size_t cursor)
     {
-        for(unsigned i = 0; i < szClip /2 ; i += 2)
+        for(unsigned i = 0; i < szClip / 2 ; i += 2)
         {
             int sample = 0;
             for(int srcChan = 0; srcChan < srcNChannels; ++srcChan)
             {
-                int sampleA = ((short*)clip)[i + srcChan];
-                int sampleB = ((short*)clip)[i + sizeof(short) * srcNChannels + srcChan];
-                sample += gfxm::lerp(sampleA, sampleB, cursor - (size_t)cursor);
+                sample += ((short*)clip)[i + srcChan];
             }
             sample /= srcNChannels;
             for(int tgtChan = 0; tgtChan < tgtNChannels; ++tgtChan)
@@ -215,7 +218,7 @@ struct AudioEmitter
     {}
     
     AudioBuffer* buffer = 0;
-    double cursor = 0;
+    size_t cursor = 0;
     gfxm::vec3 position;
     bool looping;
     bool stopped;
@@ -263,17 +266,14 @@ struct AudioEmitter
         );
     }
     
-    void Advance(int sampleRate, int adv)
+    void Advance(int adv)
     {
         if(!buffer)
             return;
         size_t bufSize = buffer->Size();
-        cursor += adv * (buffer->SampleRate() / (double)sampleRate);
+        cursor += adv;
         if(cursor >= bufSize)
             cursor = cursor - bufSize;
-        
-        //std::cout << "Cursor: " << cursor << std::endl;
-        //std::cout << "BufSize: " << bufSize << std::endl;
     }
 };
 
@@ -286,33 +286,47 @@ public:
     void EarDistance(float meters) { earDistance = meters; }
     float EarDistance() { return earDistance; }
     
+    UINT64 prevSamplesPlayed = 0;
+    size_t prevCursor = 0;
     void Update()
     {
         XAUDIO2_VOICE_STATE state;
         pSourceVoice->GetState(&state);
-        if(state.BuffersQueued < 2)
+        size_t cursor = state.SamplesPlayed * (bitPerSample / 8) * nChannels;
+        size_t cursorDelta = cursor - prevCursor;
+        size_t cursorBuffer = cursor % sizeof(buffer);
+        if(cursor == prevCursor)
         {
-            ZeroMemory(buffer, sizeof(buffer));
-            for(AudioEmitter* obj : objects)
-            {
-                obj->Mix(
-                    (char*)buffer, 
-                    sampleRate,
-                    sampleRate,
-                    bitPerSample,
-                    nChannels, 
-                    gfxm::vec3(-0.1075f, 0.0f, 0.0f),
-                    gfxm::vec3(0.1075f, 0.0f, 0.0f)
-                );
-                obj->Advance(sampleRate, sampleRate);
-            }
-            
-            XAUDIO2_BUFFER buf = { 0 };
-            buf.AudioBytes = sampleRate;
-            buf.pAudioData = (BYTE*)buffer;
-            
-            pSourceVoice->SubmitSourceBuffer(&buf);
+            return;
         }
+        
+        char tempBuffer[22050];
+        ZeroMemory(tempBuffer, sizeof(tempBuffer));
+        for(AudioEmitter* obj : objects)
+        {
+            obj->Mix(
+                (char*)tempBuffer, 
+                sizeof(tempBuffer),
+                sampleRate,
+                bitPerSample,
+                nChannels, 
+                gfxm::vec3(-0.1075f, 0.0f, 0.0f),
+                gfxm::vec3(0.1075f, 0.0f, 0.0f)
+            );
+            obj->Advance(cursorDelta);
+        }
+        
+        char* buf1 = (char*)buffer + cursorBuffer;
+        char* buf2 = (char*)buffer;
+        
+        size_t szBuf1 = sizeof(buffer) - cursorBuffer;
+        if(szBuf1 > sizeof(tempBuffer)) szBuf1 = sizeof(tempBuffer);
+        size_t szBuf2 = sizeof(tempBuffer) - szBuf1;
+        
+        memcpy(buf1, tempBuffer, szBuf1);
+        memcpy(buf2, tempBuffer + szBuf1, szBuf2);
+        
+        prevCursor = cursor;
     }
     
     AudioBuffer* CreateBuffer()
@@ -368,6 +382,7 @@ private:
 
 int AudioMixer3D::Init(int sampleRate, int bitPerSample)
 {
+    ZeroMemory(buffer, sizeof(buffer));
     this->sampleRate = sampleRate;
     this->bitPerSample = bitPerSample;
     this->nChannels = 2;
@@ -434,6 +449,15 @@ int AudioMixer3D::Init(int sampleRate, int bitPerSample)
     }
         
     pSourceVoice->Start(0, 0);
+        
+    XAUDIO2_BUFFER buf = { 0 };
+    buf.AudioBytes = sizeof(buffer);
+    buf.pAudioData = (BYTE*)buffer;
+    buf.LoopCount = XAUDIO2_LOOP_INFINITE;
+    
+    hr = pSourceVoice->SubmitSourceBuffer(&buf);
+    
+    pMasteringVoice->SetVolume(0.25f);
     
     return 0;
 }
@@ -469,7 +493,7 @@ int main()
     mixer.Init(44100, 16);
     
     AudioEmitter* obj = mixer.CreateInstance();
-    obj->buffer = LoadAudioBuffer(&mixer, "test2.ogg");
+    obj->buffer = LoadAudioBuffer(&mixer, "test24.ogg");
     obj->position = gfxm::vec3(0.2f, 0.2f, -0.65f);
     obj->Play(1);
     obj = mixer.CreateInstance();
